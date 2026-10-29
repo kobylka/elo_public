@@ -1,0 +1,54 @@
+name: Publish verified ELO release
+
+on:
+  repository_dispatch:
+    types: [publish-verified-release]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing draft release tag
+        required: true
+        type: string
+      sha256:
+        description: Expected SHA-256 from the private build pipeline
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+concurrency:
+  group: public-release-${{ github.event.client_payload.tag || inputs.tag }}
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      RELEASE_TAG: ${{ github.event.client_payload.tag || inputs.tag }}
+      EXPECTED_SHA256: ${{ github.event.client_payload.sha256 || inputs.sha256 }}
+    steps:
+      - name: Validate draft and download only release assets
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ -n "$RELEASE_TAG" ]]
+          [[ "$EXPECTED_SHA256" =~ ^[a-fA-F0-9]{64}$ ]]
+          gh release view "$RELEASE_TAG" --repo "$GH_REPO" --json isDraft,assets > draft.json
+          jq -e '.isDraft == true and ([.assets[].name] | sort) == ["ELO.exe", "ELO.exe.sha256"]' draft.json
+          mkdir release
+          gh release download "$RELEASE_TAG" --repo "$GH_REPO" --pattern ELO.exe --pattern ELO.exe.sha256 --dir release
+      - name: Verify both checksums before making assets public
+        working-directory: release
+        shell: bash
+        run: |
+          set -euo pipefail
+          sha256sum --check ELO.exe.sha256
+          actual=$(sha256sum ELO.exe | cut -d ' ' -f 1)
+          [[ "$actual" == "${EXPECTED_SHA256,,}" ]]
+          [[ $(find . -maxdepth 1 -type f | wc -l) -eq 2 ]]
+      - name: Publish verified draft
+        shell: bash
+        run: gh release edit "$RELEASE_TAG" --repo "$GH_REPO" --draft=false
